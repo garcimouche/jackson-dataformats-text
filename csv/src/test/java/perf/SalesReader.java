@@ -28,8 +28,8 @@ public final class SalesReader
     {
         int x = 1;
         while (x<3) {
-//            Class<?> cls = ((x & 1) == 0) ? Map.class : SalesEntry.class;
-            Class<?> cls = ((x & 1) == 0) ? Map.class : StringPair.class;
+            Class<?> cls = ((x & 1) == 0) ? Map.class : SalesEntry.class;
+//            Class<?> cls = ((x & 1) == 0) ? Map.class : StringPair.class;
             ++x;
             readAll(inputFile, cls);
             Thread.sleep(500L); 
@@ -43,21 +43,21 @@ public final class SalesReader
         int count = 0;
         CsvMapper mapper = new CsvMapper();
         
-//        CsvSchema schema = CsvSchema.builder()
-//            .setUseHeader(true)
-//            .build();
-//        
-//        MappingIterator<T> it = mapper.readerFor(cls)
-//                .with(schema)
-//                .readValues(inputFile);
-        
-        CsvSchema schema = mapper.schemaFor(StringPair.class);
-        schema.skipsFirstDataRow();
+        CsvSchema schema = CsvSchema.builder()
+            .setUseHeader(true)
+            .build();
         
         MappingIterator<T> it = mapper.readerFor(cls)
-                                      .with(schema)
-                                      .with(CsvParser.Feature.IGNORE_TRAILING_UNMAPPABLE)
-                                      .readValues(inputFile);
+                .with(schema)
+                .readValues(inputFile);
+        
+//        CsvSchema schema = mapper.schemaFor(StringPair.class);
+//        schema.skipsFirstDataRow();
+        
+//        MappingIterator<T> it = mapper.readerFor(cls)
+//                                      .with(schema)
+//                                      .with(CsvParser.Feature.IGNORE_TRAILING_UNMAPPABLE)
+//                                      .readValues(inputFile);
 
         while (it.hasNext()) {
             T row = it.nextValue();
