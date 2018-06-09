@@ -46,8 +46,26 @@
       <scope>test</scope>
     </dependency>
   </dependencies>
-
   <build>
+    <plugins>
+        <plugin>
+	        <groupId>org.apache.maven.plugins</groupId>
+	        <artifactId>maven-pmd-plugin</artifactId>
+	        <version>3.10.0</version>
+	        <configuration>
+	            <failOnViolation>false</failOnViolation> <!-- this is actually true by default, but can be disabled -->
+	            <printFailingErrors>false</printFailingErrors>
+	        </configuration>
+	        <executions>
+	          <execution>
+	            <goals>
+	              <goal>check</goal>
+	            </goals>
+	          </execution>
+	        </executions>
+    	</plugin>  
+    </plugins>
+    
     <pluginManagement>
       <plugins>
 	<plugin>
@@ -71,7 +89,7 @@
             </excludes>
           </configuration>
 	</plugin>
-      </plugins>
+    </plugins>
     </pluginManagement>
   </build>
 
