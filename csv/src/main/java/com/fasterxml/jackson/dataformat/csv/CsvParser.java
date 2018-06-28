@@ -1,10 +1,24 @@
 package com.fasterxml.jackson.dataformat.csv;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 
-import com.fasterxml.jackson.core.*;
+import com.fasterxml.jackson.core.Base64Variant;
+import com.fasterxml.jackson.core.FormatFeature;
+import com.fasterxml.jackson.core.FormatSchema;
+import com.fasterxml.jackson.core.JsonLocation;
+import com.fasterxml.jackson.core.JsonParseException;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonStreamContext;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.JsonTokenId;
+import com.fasterxml.jackson.core.ObjectCodec;
+import com.fasterxml.jackson.core.SerializableString;
+import com.fasterxml.jackson.core.Version;
 import com.fasterxml.jackson.core.base.ParserMinimalBase;
 import com.fasterxml.jackson.core.json.DupDetector;
 import com.fasterxml.jackson.core.json.JsonReadContext;
@@ -159,91 +173,6 @@ public class CsvParser
 
     /*
     /**********************************************************************
-    /* State constants
-    /**********************************************************************
-     */
-
-    /**
-     * Initial state before anything is read from document.
-     */
-    protected final static int STATE_DOC_START = 0;
-    
-    /**
-     * State before logical start of a record, in which next
-     * token to return will be {@link JsonToken#START_OBJECT}
-     * (or if no Schema is provided, {@link JsonToken#START_ARRAY}).
-     */
-    protected final static int STATE_RECORD_START = 1;
-
-    /**
-     * State in which next entry will be available, returning
-     * either {@link JsonToken#FIELD_NAME} or value
-     * (depending on whether entries are expressed as
-     * Objects or just Arrays); or
-     * matching close marker.
-     */
-    protected final static int STATE_NEXT_ENTRY = 2;
-
-    /**
-     * State in which value matching field name will
-     * be returned.
-     */
-    protected final static int STATE_NAMED_VALUE = 3;
-
-    /**
-     * State in which "unnamed" value (entry in an array)
-     * will be returned, if one available; otherwise
-     * end-array is returned.
-     */
-    protected final static int STATE_UNNAMED_VALUE = 4;
-
-    /**
-     * State in which a column value has been determined to be of
-     * an array type, and will need to be split into multiple
-     * values. This can currently only occur for named values.
-     * 
-     * @since 2.5
-     */
-    protected final static int STATE_IN_ARRAY = 5;
-
-    /**
-     * State in which we have encountered more column values than there should be,
-     * and need to basically skip extra values if callers tries to advance parser
-     * state.
-     *
-     * @since 2.6
-     */
-    protected final static int STATE_SKIP_EXTRA_COLUMNS = 6;
-
-    /**
-     * State in which we should expose name token for a "missing column"
-     * (for which placeholder `null` value is to be added as well);
-     * see {@link Feature#INSERT_NULLS_FOR_MISSING_COLUMNS} for details.
-     *
-     * @since 2.9
-     */
-    protected final static int STATE_MISSING_NAME = 7;
-
-    /**
-     * State in which we should expose `null` value token as a value for
-     * "missing" column;
-     * see {@link Feature#INSERT_NULLS_FOR_MISSING_COLUMNS} for details.
-     *
-     * @since 2.9
-     */
-    protected final static int STATE_MISSING_VALUE = 8;
-
-    /**
-     * State in which end marker is returned; either
-     * null (if no array wrapping), or
-     * {@link JsonToken#END_ARRAY} for wrapping.
-     * This step will loop, returning series of nulls
-     * if {@link #nextToken} is called multiple times.
-     */
-    protected final static int STATE_DOC_END = 9;
-
-    /*
-    /**********************************************************************
     /* Configuration
     /**********************************************************************
      */
@@ -299,7 +228,7 @@ public class CsvParser
      * Current logical state of the parser; one of <code>STATE_</code>
      * constants.
      */
-    protected int _state = STATE_DOC_START;
+    protected CsvParserState _state = new CsvStateDocStart();
 
     /**
      * We will hold on to decoded binary data, for duration of
@@ -584,38 +513,8 @@ public class CsvParser
     public JsonToken nextToken() throws IOException
     {
         _binaryValue = null;
-        switch (_state) {
-        case STATE_DOC_START:
-            return (_currToken = _handleStartDoc());
-        case STATE_RECORD_START:
-            return (_currToken = _handleRecordStart());
-        case STATE_NEXT_ENTRY:
-            return (_currToken = _handleNextEntry());
-        case STATE_NAMED_VALUE:
-            return (_currToken = _handleNamedValue());
-        case STATE_UNNAMED_VALUE:
-            return (_currToken = _handleUnnamedValue());
-        case STATE_IN_ARRAY:
-            return (_currToken = _handleArrayValue());
-        case STATE_SKIP_EXTRA_COLUMNS:
-            // Need to just skip whatever remains
-            return _skipUntilEndOfLine();
-        case STATE_MISSING_NAME:
-            return (_currToken = _handleMissingName());
-        case STATE_MISSING_VALUE:
-            return (_currToken = _handleMissingValue());
-        case STATE_DOC_END:
-            _reader.close();
-            if (_parsingContext.inRoot()) {
-                return null;
-            }
-            // should always be in array, actually... but:
-            boolean inArray = _parsingContext.inArray();
-            _parsingContext = _parsingContext.getParent();
-            return inArray ? JsonToken.END_ARRAY : JsonToken.END_OBJECT;
-        default:
-            throw new IllegalStateException();
-        }
+        
+        return _currToken = _state.handle(this);
     }
 
     /*
@@ -627,9 +526,9 @@ public class CsvParser
     @Override
     public boolean nextFieldName(SerializableString str) throws IOException {
         // Optimize for expected case of getting FIELD_NAME:
-        if (_state == STATE_NEXT_ENTRY) {
+        if (_state instanceof CsvStateNextEntry) {
             _binaryValue = null;
-            JsonToken t = _handleNextEntry();
+            JsonToken t = _state.handle(this);
             _currToken = t;
             if (t == JsonToken.FIELD_NAME) {
                 return str.getValue().equals(_currentName);
@@ -644,9 +543,9 @@ public class CsvParser
     public String nextFieldName() throws IOException
     {
         // Optimize for expected case of getting FIELD_NAME:
-        if (_state == STATE_NEXT_ENTRY) {
+        if (_state instanceof CsvStateNextEntry) {
             _binaryValue = null;
-            JsonToken t = _handleNextEntry();
+            JsonToken t = _state.handle(this);
             _currToken = t;
             if (t == JsonToken.FIELD_NAME) {
                 return _currentName;
@@ -662,13 +561,13 @@ public class CsvParser
     {
         _binaryValue = null;
         JsonToken t;
-        if (_state == STATE_NAMED_VALUE) {
-            _currToken = t = _handleNamedValue();
+        if (_state instanceof CsvStateNamedValue) {
+            _currToken = t = _state.handle(this);
             if (t == JsonToken.VALUE_STRING) {
                 return _currentValue;
             }
-        } else if (_state == STATE_UNNAMED_VALUE) {
-            _currToken = t = _handleUnnamedValue();
+        } else if (_state instanceof CsvStateUnnamedValue) {
+            _currToken = t = _state.handle(this);
             if (t == JsonToken.VALUE_STRING) {
                 return _currentValue;
             }
@@ -758,178 +657,6 @@ public class CsvParser
         setSchema(builder.build());
     }
 
-    /**
-     * Method called to handle details of initializing things to return
-     * the very first token.
-     */
-    protected JsonToken _handleStartDoc() throws IOException
-    {
-        // also, if comments enabled, may need to skip leading ones
-        _reader.skipLeadingComments();
-        // First things first: are we expecting header line? If so, read, process
-        if (_schema.usesHeader()) {
-            _readHeaderLine();
-            _reader.skipLeadingComments();
-        }
-        // and if we are to skip the first data line, skip it
-        if (_schema.skipsFirstDataRow()) {
-            _reader.skipLine();
-            _reader.skipLeadingComments();
-        }
-        
-        /* Only one real complication, actually; empy documents (zero bytes).
-         * Those have no entries. Should be easy enough to detect like so:
-         */
-        final boolean wrapAsArray = Feature.WRAP_AS_ARRAY.enabledIn(_formatFeatures);
-        if (!_reader.hasMoreInput()) {
-            _state = STATE_DOC_END;
-            // but even empty sequence must still be wrapped in logical array
-            if (wrapAsArray) {
-                _parsingContext = _reader.childArrayContext(_parsingContext);
-                return JsonToken.START_ARRAY;
-            }
-            return null;
-        }
-        
-        if (wrapAsArray) {
-            _parsingContext = _reader.childArrayContext(_parsingContext);
-            _state = STATE_RECORD_START;
-            return JsonToken.START_ARRAY;
-        }
-        // otherwise, same as regular new entry...
-        return _handleRecordStart();
-    }
-
-    protected JsonToken _handleRecordStart() throws IOException
-    {
-        _columnIndex = 0;
-        if (_columnCount == 0) { // no schema; exposed as an array
-            _state = STATE_UNNAMED_VALUE;
-            _parsingContext = _reader.childArrayContext(_parsingContext);
-            return JsonToken.START_ARRAY;
-        }
-        // otherwise, exposed as an Object
-        _parsingContext = _reader.childObjectContext(_parsingContext);
-        _state = STATE_NEXT_ENTRY;
-        return JsonToken.START_OBJECT;
-    }
-
-    protected JsonToken _handleNextEntry() throws IOException
-    {
-        // NOTE: only called when we do have real Schema
-        String next;
-
-        try {
-            next = _reader.nextString();
-        } catch (IOException e) {
-            // 12-Oct-2015, tatu: Need to resync here as well...
-            _state = STATE_SKIP_EXTRA_COLUMNS;
-            throw e;
-        }
-
-        if (next == null) { // end of record or input...
-            // 16-Mar-2017, tatu: [dataformat-csv#137] Missing column(s)?
-            if (_columnIndex < _columnCount) {
-                return _handleMissingColumns();
-            }
-            return _handleObjectRowEnd();
-        }
-        _currentValue = next;
-        if (_columnIndex >= _columnCount) {
-            return _handleExtraColumn(next);
-        }
-        _state = STATE_NAMED_VALUE;
-        _currentName = _schema.columnName(_columnIndex);
-        return JsonToken.FIELD_NAME;
-    }
-
-    protected JsonToken _handleNamedValue() throws IOException
-    {
-        // 06-Oct-2015, tatu: During recovery, may get past all regular columns,
-        //    but we also need to allow access past... sort of.
-        if (_columnIndex < _columnCount) {
-            CsvSchema.Column column = _schema.column(_columnIndex);
-            ++_columnIndex;
-            if (column.isArray()) {
-                _startArray(column);
-                return JsonToken.START_ARRAY;
-            }
-        }
-        _state = STATE_NEXT_ENTRY;
-        if (_nullValue != null) {
-            if (_nullValue.equals(_currentValue)) {
-                return JsonToken.VALUE_NULL;
-            }
-        }
-        return JsonToken.VALUE_STRING;
-    }
-
-    protected JsonToken _handleUnnamedValue() throws IOException
-    {
-        String next = _reader.nextString();
-        if (next == null) { // end of record or input...
-            _parsingContext = _parsingContext.getParent();
-            if (!_reader.startNewLine()) { // end of whole thing...
-                _state = STATE_DOC_END;
-            } else {
-                // no, just end of record
-                _state = STATE_RECORD_START;
-            }
-            return JsonToken.END_ARRAY;
-        }
-        // state remains the same
-        _currentValue = next;
-        ++_columnIndex;
-        if (_nullValue != null) {
-            if (_nullValue.equals(next)) {
-                return JsonToken.VALUE_NULL;
-            }
-        }
-        return JsonToken.VALUE_STRING;
-    }
-
-    protected JsonToken _handleArrayValue() throws IOException
-    {
-        int offset = _arrayValueStart;
-        if (offset < 0) { // just returned last value
-            _parsingContext = _parsingContext.getParent();
-            // no arrays in arrays (at least for now), so must be back to named value
-            _state = STATE_NEXT_ENTRY;
-             return JsonToken.END_ARRAY;
-        }
-        int end = _arrayValue.indexOf(_arraySeparator, offset);
-
-        if (end < 0) { // last value
-            _arrayValueStart = end; // end marker, regardless
-
-            // 11-Feb-2015, tatu: Tricky, As per [dataformat-csv#66]; empty Strings really
-            //     should not emit any values. Not sure if trim
-            if (offset == 0) { // no separator
-                // for now, let's use trimming for checking
-                if (_arrayValue.isEmpty() || _arrayValue.trim().isEmpty()) {
-                    _parsingContext = _parsingContext.getParent();
-                    _state = STATE_NEXT_ENTRY;
-                    return JsonToken.END_ARRAY;
-                }
-                _currentValue = _arrayValue;
-            } else {
-                _currentValue = _arrayValue.substring(offset);
-            }
-        } else {
-            _currentValue = _arrayValue.substring(offset, end);
-            _arrayValueStart = end+_arraySeparator.length();
-        }
-        if (isEnabled(Feature.TRIM_SPACES)) {
-            _currentValue = _currentValue.trim();
-        }
-        if (_nullValue != null) {
-            if (_nullValue.equals(_currentValue)) {
-                return JsonToken.VALUE_NULL;
-            }
-        }
-        return JsonToken.VALUE_STRING;
-    }
-
     /*
     /**********************************************************
     /* Parsing, helper methods, extra column(s)
@@ -950,19 +677,19 @@ public class CsvParser
         String anyProp = _schema.getAnyPropertyName();
         if (anyProp != null) {
             _currentName = anyProp;
-            _state = STATE_NAMED_VALUE;
+            _state = new CsvStateNamedValue();
             return JsonToken.FIELD_NAME;
         }
         _currentName = null;
         // With [dataformat-csv#95] we'll simply ignore extra
         if (Feature.IGNORE_TRAILING_UNMAPPABLE.enabledIn(_formatFeatures)) {
-            _state = STATE_SKIP_EXTRA_COLUMNS;
-            return _skipUntilEndOfLine();
+            _state = new CsvStateSkipExtraColumns();
+            return _state.handle(this);
         }
 
         // 14-Mar-2012, tatu: As per [dataformat-csv#1], let's allow one specific case
         // of extra: if we get just one all-whitespace entry, that can be just skipped
-        _state = STATE_SKIP_EXTRA_COLUMNS;
+        _state = new CsvStateSkipExtraColumns();
         if (_columnIndex == _columnCount && Feature.ALLOW_TRAILING_COMMA.enabledIn(_formatFeatures)) {
             value = value.trim();
             if (value.isEmpty()) {
@@ -1001,29 +728,12 @@ public class CsvParser
                     _columnCount, _columnIndex);
         }
         if (Feature.INSERT_NULLS_FOR_MISSING_COLUMNS.enabledIn(_formatFeatures)) {
-            _state = STATE_MISSING_VALUE;
+            _state = new CsvStateMissingValue();
             _currentName = _schema.columnName(_columnIndex);
             _currentValue = null;
             return JsonToken.FIELD_NAME;
         }
         return _handleObjectRowEnd();
-    }
-
-    protected JsonToken _handleMissingName() throws IOException
-    {
-        if (++_columnIndex < _columnCount) {
-            _state = STATE_MISSING_VALUE;
-            _currentName = _schema.columnName(_columnIndex);
-            // _currentValue already set to null earlier
-            return JsonToken.FIELD_NAME;
-        }
-        return _handleObjectRowEnd();
-    }
-
-    protected JsonToken _handleMissingValue() throws IOException
-    {
-        _state = STATE_MISSING_NAME;
-        return JsonToken.VALUE_NULL;
     }
 
     /*
@@ -1042,26 +752,23 @@ public class CsvParser
     {
         _parsingContext = _parsingContext.getParent();
         if (!_reader.startNewLine()) {
-            _state = STATE_DOC_END;
+            _state = new CsvStateDocEnd();
         } else {
-            _state = STATE_RECORD_START;
+            _state = new CsvStateRecordStart();
         }
         return JsonToken.END_OBJECT;
     }
 
-    protected final JsonToken _skipUntilEndOfLine() throws IOException
-    {
-        while (_reader.nextString() != null) { }
-
-        // But once we hit the end of the logical line, get out
-        // NOTE: seems like we should always be within Object, but let's be conservative
-        // and check just in case
-        _parsingContext = _parsingContext.getParent();
-        _state = _reader.startNewLine() ? STATE_RECORD_START : STATE_DOC_END;
-        return (_currToken = _parsingContext.inArray()
-                ? JsonToken.END_ARRAY : JsonToken.END_OBJECT);
+    JsonToken getCurrToken(){
+        return _currToken;
     }
-
+    
+    JsonToken setCurrToken(JsonToken tok){
+        _currToken = tok;
+        return _currToken;
+    }
+    
+    
     /*
     /**********************************************************
     /* String value handling
@@ -1252,7 +959,7 @@ public class CsvParser
         _currToken = JsonToken.START_ARRAY;
         _parsingContext = _parsingContext.createChildArrayContext(_reader.getCurrentRow(),
                 _reader.getCurrentColumn());
-        _state = STATE_IN_ARRAY;
+        _state = new CsvStateInArray();
         _arrayValueStart = 0;
         _arrayValue = _currentValue;
         String sep = column.getArrayElementSeparator();
